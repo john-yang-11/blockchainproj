@@ -1,0 +1,583 @@
+{
+  "address": "6Pghm9oUF9Tx6VXUwGed7iKqL1qqnYvXciCUaCT63S3L",
+  "metadata": {
+    "name": "place",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "OnChain Place: r/place as a Solana program"
+  },
+  "instructions": [
+    {
+      "name": "init_chunk",
+      "docs": [
+        "Creates one zero-filled (all white, tier 0) canvas chunk. Called once per chunk at deploy."
+      ],
+      "discriminator": [
+        16,
+        49,
+        16,
+        40,
+        65,
+        169,
+        31,
+        154
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "chunk",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  104,
+                  117,
+                  110,
+                  107
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "index"
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "index",
+          "type": "u16"
+        }
+      ]
+    },
+    {
+      "name": "initialize",
+      "discriminator": [
+        175,
+        175,
+        109,
+        31,
+        13,
+        152,
+        155,
+        237
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "width",
+          "type": "u16"
+        },
+        {
+          "name": "height",
+          "type": "u16"
+        },
+        {
+          "name": "base_price",
+          "type": "u64"
+        },
+        {
+          "name": "price_increment",
+          "type": "u64"
+        },
+        {
+          "name": "cooldown_secs",
+          "type": "i64"
+        }
+      ]
+    },
+    {
+      "name": "place_pixel",
+      "discriminator": [
+        178,
+        40,
+        167,
+        97,
+        31,
+        149,
+        219,
+        143
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "chunk",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  104,
+                  117,
+                  110,
+                  107
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chunk_index"
+              }
+            ]
+          }
+        },
+        {
+          "name": "player",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  121,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "painter"
+              }
+            ]
+          }
+        },
+        {
+          "name": "painter",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "chunk_index",
+          "type": "u16"
+        },
+        {
+          "name": "x",
+          "type": "u16"
+        },
+        {
+          "name": "y",
+          "type": "u16"
+        },
+        {
+          "name": "color",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "set_authority",
+      "discriminator": [
+        133,
+        250,
+        37,
+        21,
+        110,
+        163,
+        26,
+        121
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "new_authority",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "withdraw",
+      "docs": [
+        "Moves collected fees to `to`, never dropping the config below rent exemption."
+      ],
+      "discriminator": [
+        183,
+        18,
+        70,
+        156,
+        148,
+        109,
+        161,
+        34
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "to",
+          "writable": true
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "CanvasChunk",
+      "discriminator": [
+        251,
+        254,
+        96,
+        184,
+        62,
+        159,
+        49,
+        123
+      ]
+    },
+    {
+      "name": "Config",
+      "discriminator": [
+        155,
+        12,
+        170,
+        224,
+        30,
+        250,
+        204,
+        130
+      ]
+    },
+    {
+      "name": "Player",
+      "discriminator": [
+        205,
+        222,
+        112,
+        7,
+        165,
+        155,
+        206,
+        218
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "PixelPlaced",
+      "discriminator": [
+        220,
+        12,
+        68,
+        133,
+        233,
+        184,
+        244,
+        120
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "OutOfBounds",
+      "msg": "Pixel is outside the canvas"
+    },
+    {
+      "code": 6001,
+      "name": "InvalidColor",
+      "msg": "Color must be a palette index from 0 to 15"
+    },
+    {
+      "code": 6002,
+      "name": "CooldownActive",
+      "msg": "Cooldown active: wait before placing another pixel"
+    },
+    {
+      "code": 6003,
+      "name": "WrongChunk",
+      "msg": "Chunk account does not match the pixel coordinates"
+    },
+    {
+      "code": 6004,
+      "name": "InsufficientVault",
+      "msg": "Not enough withdrawable lamports in the vault"
+    },
+    {
+      "code": 6005,
+      "name": "Unauthorized",
+      "msg": "Only the authority can do this"
+    },
+    {
+      "code": 6006,
+      "name": "BadConfig",
+      "msg": "Invalid canvas configuration"
+    }
+  ],
+  "types": [
+    {
+      "name": "CanvasChunk",
+      "serialization": "bytemuck",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pixels",
+            "type": {
+              "array": [
+                "u8",
+                10000
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Config",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "width",
+            "type": "u16"
+          },
+          {
+            "name": "height",
+            "type": "u16"
+          },
+          {
+            "name": "base_price",
+            "type": "u64"
+          },
+          {
+            "name": "price_increment",
+            "type": "u64"
+          },
+          {
+            "name": "cooldown_secs",
+            "type": "i64"
+          },
+          {
+            "name": "total_placements",
+            "type": "u64"
+          },
+          {
+            "name": "total_collected",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PixelPlaced",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "x",
+            "type": "u16"
+          },
+          {
+            "name": "y",
+            "type": "u16"
+          },
+          {
+            "name": "color",
+            "type": "u8"
+          },
+          {
+            "name": "tier_before",
+            "type": "u8"
+          },
+          {
+            "name": "painter",
+            "type": "pubkey"
+          },
+          {
+            "name": "price",
+            "type": "u64"
+          },
+          {
+            "name": "timestamp",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Player",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "wallet",
+            "type": "pubkey"
+          },
+          {
+            "name": "last_placed",
+            "type": "i64"
+          },
+          {
+            "name": "pixels_placed",
+            "type": "u64"
+          },
+          {
+            "name": "lamports_spent",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    }
+  ]
+}

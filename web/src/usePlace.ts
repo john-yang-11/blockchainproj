@@ -1,35 +1,29 @@
 import { useEffect, useState } from 'react'
-import { usePublicClient } from 'wagmi'
-import { getAbiItem, parseEventLogs, type Address, type Hash, type Log } from 'viem'
-import { placeAbi } from './abi'
-import { contractAddress, deployBlock, logChunk } from './config'
+import { useConnection } from '@solana/wallet-adapter-react'
+import type { Connection } from '@solana/web3.js'
+import { programId } from './config'
+import {
+  CHUNK_SIZE,
+  chunkCount,
+  chunkPda,
+  configPda,
+  decodeConfig,
+  parsePlacements,
+  recentPlacements,
+  type Placement,
+  type PlaceParams,
+} from './solana'
 
-export type Placement = {
-  pixelId: number
-  x: number
-  y: number
-  painter: Address
-  color: number
-  overwrites: number
-  price: bigint
-  blockNumber: bigint
-  txHash: Hash
-  logIndex: number
-}
-
-export type PlaceParams = {
-  width: number
-  height: number
-  basePrice: bigint
-  priceIncrement: bigint
-  cooldown: number
-}
+export type { Placement, PlaceParams }
 
 export type PlaceState = {
   status: 'loading' | 'ready' | 'error'
   error?: string
   params?: PlaceParams
+  /** Palette index per pixel (low nibble of the on-chain byte). */
   colors: Uint8Array
+  /** Overwrite tier per pixel (high nibble), which sets the price. */
+  tiers: Uint8Array
   /** Recent placements (for the activity feed) plus everything seen live, oldest first. */
   placements: Placement[]
   totalPlacements: number
@@ -37,184 +31,132 @@ export type PlaceState = {
   version: number
 }
 
-type Client = NonNullable<ReturnType<typeof usePublicClient>>
-
-const MAX_PARALLEL = 4
-/** Canvas words per getCanvas call: 2048 words = 131k pixels, ~4.5M gas of SLOADs, well under RPC eth_call caps. */
-const CANVAS_CHUNK = 2048
-/** How many recent placements to backfill for the activity feed. The full history can be huge, so we don't load it. */
+/** How many recent placements to backfill for the activity feed. Full history is never loaded. */
 const RECENT = 200
-const pixelPlaced = getAbiItem({ abi: placeAbi, name: 'PixelPlaced' })
+/** Full re-read of the canvas accounts, in case the log websocket dropped something. */
+const RESYNC_MS = 20_000
 
-/** Unpack 4-bit colors from 256-bit words into `out`, starting at word index `firstWord`. */
-function unpackColors(words: readonly bigint[], firstWord: number, out: Uint8Array) {
-  for (let w = 0; w < words.length; w++) {
-    const word = words[w]
-    if (word === 0n) continue // blank (white) — most of a fresh board
-    // Split into 32-bit pieces so the inner loop runs on Numbers, not BigInts.
-    let base = (firstWord + w) * 64
-    for (let q = 0; q < 8; q++, base += 8) {
-      let part = Number((word >> BigInt(q * 32)) & 0xffffffffn)
-      for (let i = 0; i < 8; i++, part >>>= 4) out[base + i] = part & 0xf
-    }
+/** Reads config + every chunk account (≤100 per RPC call) into flat color/tier arrays. */
+async function loadCanvas(connection: Connection) {
+  const cfg = await connection.getAccountInfo(configPda, 'confirmed')
+  if (!cfg) throw new Error(`No canvas found for program ${programId.toBase58()}. Deploy and initialize it first (see README).`)
+  const params = decodeConfig(cfg.data)
+  const total = params.width * params.height
+  const colors = new Uint8Array(total)
+  const tiers = new Uint8Array(total)
+  const keys = Array.from({ length: chunkCount(params) }, (_, i) => chunkPda(i))
+  for (let start = 0; start < keys.length; start += 100) {
+    const infos = await connection.getMultipleAccountsInfo(keys.slice(start, start + 100), 'confirmed')
+    infos.forEach((info, j) => {
+      if (!info) return // chunk not initialized yet: shows as blank
+      const base = (start + j) * CHUNK_SIZE
+      const bytes = info.data.subarray(8, 8 + Math.min(CHUNK_SIZE, total - base))
+      for (let k = 0; k < bytes.length; k++) {
+        colors[base + k] = bytes[k] & 0xf
+        tiers[base + k] = bytes[k] >> 4
+      }
+    })
   }
+  return { params, colors, tiers }
 }
 
-export function toPlacements(logs: Log[], width: number): Placement[] {
-  return parseEventLogs({ abi: placeAbi, eventName: 'PixelPlaced', logs }).map((l) => {
-    const id = Number(l.args.pixelId)
-    return {
-      pixelId: id,
-      x: id % width,
-      y: Math.floor(id / width),
-      painter: l.args.painter,
-      color: l.args.color,
-      overwrites: l.args.overwrites,
-      price: l.args.price,
-      blockNumber: l.blockNumber!,
-      txHash: l.transactionHash!,
-      logIndex: l.logIndex!,
-    }
-  })
-}
-
-const byChain = (a: Placement, b: Placement) =>
-  a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : a.blockNumber < b.blockNumber ? -1 : 1
-
-/** All placements on one pixel, oldest first. The pixel id is an indexed topic, so this stays cheap on any board size. */
-export async function fetchPixelHistory(client: Client, pixelId: number, width: number): Promise<Placement[]> {
-  if (!contractAddress) return []
-  const head = await client.getBlockNumber()
-  const ranges: [bigint, bigint][] = []
-  for (let from = deployBlock; from <= head; from += logChunk + 1n)
-    ranges.push([from, from + logChunk > head ? head : from + logChunk])
-  const out: Placement[] = []
-  let next = 0
-  const worker = async () => {
-    while (next < ranges.length) {
-      const [fromBlock, toBlock] = ranges[next++]
-      const logs = await client.getLogs({ address: contractAddress, event: pixelPlaced, args: { pixelId: BigInt(pixelId) }, fromBlock, toBlock })
-      out.push(...toPlacements(logs, width))
-    }
-  }
-  await Promise.all(Array.from({ length: MAX_PARALLEL }, worker))
-  return out.sort(byChain)
+/** This pixel's placements among its chunk's recent transactions, newest first. Best effort, capped. */
+export async function fetchPixelHistory(connection: Connection, x: number, y: number, width: number): Promise<Placement[]> {
+  const chunk = Math.floor((y * width + x) / CHUNK_SIZE)
+  const all = await recentPlacements(connection, chunkPda(chunk), 300)
+  return all.filter((p) => p.x === x && p.y === y)
 }
 
 export function usePlace(): PlaceState {
-  const client = usePublicClient()
+  const { connection } = useConnection()
   const [state, setState] = useState<PlaceState>({
     status: 'loading',
     colors: new Uint8Array(0),
+    tiers: new Uint8Array(0),
     placements: [],
     totalPlacements: 0,
     version: 0,
   })
 
   useEffect(() => {
-    if (!client || !contractAddress) {
-      setState((s) => ({ ...s, status: 'error', error: 'VITE_CONTRACT_ADDRESS is not set — see README.' }))
-      return
-    }
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
-    const address = contractAddress
+    let sub: number | undefined
+    const seen = new Set<string>()
 
-    const fetchRange = (fromBlock: bigint, toBlock: bigint) => client.getLogs({ address, event: pixelPlaced, fromBlock, toBlock })
+    const apply = (fresh: Placement[]) => {
+      fresh = fresh.filter((p) => {
+        const key = `${p.signature}:${p.x}:${p.y}`
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      if (!fresh.length || cancelled) return
+      setState((s) => {
+        if (!s.params) return s
+        for (const p of fresh) {
+          const i = p.y * s.params.width + p.x
+          s.colors[i] = p.color
+          s.tiers[i] = Math.min(15, p.tierBefore + 1)
+        }
+        return {
+          ...s,
+          placements: [...s.placements, ...fresh],
+          totalPlacements: s.totalPlacements + fresh.length,
+          version: s.version + 1,
+        }
+      })
+    }
 
     ;(async () => {
       try {
-        const base = { address, abi: placeAbi } as const
-        const [width, height, basePrice, priceIncrement, cooldown] = await Promise.all([
-          client.readContract({ ...base, functionName: 'width' }),
-          client.readContract({ ...base, functionName: 'height' }),
-          client.readContract({ ...base, functionName: 'basePrice' }),
-          client.readContract({ ...base, functionName: 'priceIncrement' }),
-          client.readContract({ ...base, functionName: 'cooldown' }),
-        ])
-        const params: PlaceParams = {
-          width: Number(width),
-          height: Number(height),
-          basePrice,
-          priceIncrement,
-          cooldown: Number(cooldown),
-        }
-        const total = params.width * params.height
-
-        // Snapshot the canvas at a fixed block so live polling picks up exactly where it left off.
-        const snapshot = await client.getBlockNumber()
-        const colors = new Uint8Array(total)
-        const starts: number[] = []
-        for (let w = 0; w < total / 64; w += CANVAS_CHUNK) starts.push(w)
-        const [totalPlacements] = await Promise.all([
-          client.readContract({ ...base, functionName: 'totalPlacements', blockNumber: snapshot }),
-          ...starts.map(async (from) => {
-            const words = await client.readContract({
-              ...base,
-              functionName: 'getCanvas',
-              args: [BigInt(from), BigInt(CANVAS_CHUNK)],
-              blockNumber: snapshot,
-            })
-            unpackColors(words, from, colors)
-          }),
-        ])
+        const { params, colors, tiers } = await loadCanvas(connection)
         if (cancelled) return
-        setState((s) => ({ ...s, status: 'ready', params, colors, totalPlacements: Number(totalPlacements), version: s.version + 1 }))
+        setState((s) => ({
+          ...s,
+          status: 'ready',
+          params,
+          colors,
+          tiers,
+          totalPlacements: params.totalPlacements,
+          version: s.version + 1,
+        }))
 
-        // Live updates: poll getLogs (works on every RPC, unlike eth_newFilter).
-        let cursor = snapshot
-        const poll = async () => {
-          try {
-            const head = await client.getBlockNumber()
-            if (head > cursor) {
-              const from = cursor + 1n
-              const to = head - from > logChunk ? from + logChunk : head
-              const fresh = toPlacements(await fetchRange(from, to), params.width)
-              cursor = to
-              if (fresh.length && !cancelled) {
-                setState((s) => {
-                  for (const p of fresh) s.colors[p.pixelId] = p.color
-                  return {
-                    ...s,
-                    placements: [...s.placements, ...fresh],
-                    totalPlacements: s.totalPlacements + fresh.length,
-                    version: s.version + 1,
-                  }
-                })
-              }
-            }
-          } catch (e) {
-            console.warn('poll failed', e)
-          }
-          if (!cancelled) timer = setTimeout(poll, client.pollingInterval)
-        }
-        poll()
+        // Live updates: every place_pixel emits a PixelPlaced event into the program's logs.
+        sub = connection.onLogs(
+          programId,
+          (l) => {
+            if (!l.err) apply(parsePlacements(l.logs, l.signature, 0))
+          },
+          'confirmed',
+        )
 
-        // Backfill recent activity, newest first. The window starts small and grows while results stay
-        // small, and shrinks if the RPC rejects a range (too many logs / response too large).
-        const recent: Placement[] = []
-        let span = 256n
-        let to = snapshot
-        while (!cancelled && to >= deployBlock && recent.length < RECENT) {
-          const from = to - span + 1n < deployBlock ? deployBlock : to - span + 1n
-          let logs
+        // Periodic resync from the accounts themselves (the chain is the source of truth).
+        const resync = async () => {
           try {
-            logs = await fetchRange(from, to)
+            const fresh = await loadCanvas(connection)
+            if (!cancelled)
+              setState((s) => ({
+                ...s,
+                params: fresh.params,
+                colors: fresh.colors,
+                tiers: fresh.tiers,
+                totalPlacements: Math.max(s.totalPlacements, fresh.params.totalPlacements),
+                version: s.version + 1,
+              }))
           } catch (e) {
-            if (span > 1n) {
-              span /= 2n
-              continue
-            }
-            throw e
+            console.warn('resync failed', e)
           }
-          recent.push(...toPlacements(logs, params.width))
-          to = from - 1n
-          if (logs.length < RECENT && span < logChunk) span *= 2n
+          if (!cancelled) timer = setTimeout(resync, RESYNC_MS)
         }
-        if (!cancelled && recent.length) {
-          const keep = recent.sort(byChain).slice(-RECENT)
-          setState((s) => ({ ...s, placements: [...keep, ...s.placements] }))
-        }
+        timer = setTimeout(resync, RESYNC_MS)
+
+        // Backfill the activity feed from recent transactions on the config account
+        // (every placement writes to it).
+        const recent = await recentPlacements(connection, configPda, RECENT)
+        if (cancelled) return
+        for (const p of recent) seen.add(`${p.signature}:${p.x}:${p.y}`)
+        setState((s) => ({ ...s, placements: [...recent.reverse(), ...s.placements] }))
       } catch (e) {
         console.error(e)
         if (!cancelled) setState((s) => ({ ...s, status: s.status === 'ready' ? 'ready' : 'error', error: errMsg(e) }))
@@ -224,16 +166,17 @@ export function usePlace(): PlaceState {
     return () => {
       cancelled = true
       clearTimeout(timer)
+      if (sub !== undefined) connection.removeOnLogsListener(sub).catch(() => {})
     }
-  }, [client])
+  }, [connection])
 
   return state
 }
 
 export function errMsg(e: unknown): string {
   if (e && typeof e === 'object') {
-    const err = e as { shortMessage?: string; message?: string }
-    return err.shortMessage ?? err.message ?? String(e)
+    const err = e as { message?: string }
+    return err.message ?? String(e)
   }
   return String(e)
 }

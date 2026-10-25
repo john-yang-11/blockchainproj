@@ -1,6 +1,12 @@
 node_modules/
-contracts/out/
-contracts/cache/
-contracts/broadcast/*/31337/
 .env
 *.local
+# Solana / Anchor
+target/
+.anchor/
+test-ledger/
+**/*-keypair.json
+*.keypair.json
+.env*
+!.env.example
+!web/.env.example

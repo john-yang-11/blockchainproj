@@ -1,41 +1,18 @@
-import { http, createConfig } from 'wagmi'
-import { baseSepolia, foundry } from 'wagmi/chains'
-import { injected, mock } from 'wagmi/connectors'
-import type { Address } from 'viem'
+import { PublicKey, clusterApiUrl } from '@solana/web3.js'
+import idl from './idl/place.json'
 
 const env = import.meta.env
 
-export const chain = env.VITE_CHAIN === 'baseSepolia' ? baseSepolia : foundry
-export const contractAddress = env.VITE_CONTRACT_ADDRESS as Address | undefined
-export const deployBlock = BigInt(env.VITE_DEPLOY_BLOCK || 0)
-export const logChunk = BigInt(env.VITE_LOG_CHUNK || 9000)
-const rpcUrl: string | undefined = env.VITE_RPC_URL || undefined
+/** "localnet" (solana-test-validator on 127.0.0.1) or "devnet". */
+export const cluster: 'localnet' | 'devnet' = env.VITE_CLUSTER === 'devnet' ? 'devnet' : 'localnet'
+export const clusterName = cluster === 'devnet' ? 'Solana devnet' : 'Solana localnet'
+export const rpcUrl: string = env.VITE_RPC_URL || (cluster === 'devnet' ? clusterApiUrl('devnet') : 'http://127.0.0.1:8899')
+export const programId = new PublicKey(env.VITE_PROGRAM_ID || idl.address)
 
-export const wagmiConfig = createConfig({
-  chains: [chain],
-  connectors: [
-    injected(),
-    // Local only: anvil's default accounts are unlocked, so we can send txs without a browser wallet.
-    ...(env.VITE_CHAIN === 'baseSepolia'
-      ? []
-      : [
-          mock({
-            accounts: [
-              '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
-              '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
-            ],
-            features: { reconnect: true },
-          }),
-        ]),
-  ],
-  transports: { [chain.id]: http(rpcUrl) } as Record<typeof chain.id, ReturnType<typeof http>>,
-  pollingInterval: chain.id === foundry.id ? 1_000 : 2_000,
-})
-
-declare module 'wagmi' {
-  interface Register {
-    config: typeof wagmiConfig
-  }
+/** Solana Explorer link for a tx or account; localnet works via the explorer's custom-RPC mode. */
+export function explorerUrl(kind: 'tx' | 'address', id: string) {
+  const q = cluster === 'devnet' ? '?cluster=devnet' : `?cluster=custom&customUrl=${encodeURIComponent(rpcUrl)}`
+  return `https://explorer.solana.com/${kind}/${id}${q}`
 }
 
 /** The 16-color palette from r/place 2017. Index 0 (white) is the blank canvas color. */

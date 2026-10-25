@@ -1,29 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import {
-  useChainId,
-  useConnect,
-  useConnection,
-  useConnectors,
-  useDisconnect,
-  usePublicClient,
-  useReadContract,
-  useSwitchChain,
-  useWriteContract,
-} from 'wagmi'
-import { formatEther, type Address } from 'viem'
-import { placeAbi } from './abi'
-import { PALETTE, chain, contractAddress } from './config'
+import { useConnection, useWallet } from '@solana/wallet-adapter-react'
+import { WalletReadyState } from '@solana/wallet-adapter-base'
+import { LAMPORTS_PER_SOL, Transaction } from '@solana/web3.js'
+import bs58 from 'bs58'
+import { PALETTE, cluster, clusterName, explorerUrl, programId } from './config'
 import { PixelCanvas, type CanvasHandle, type Pt } from './PixelCanvas'
+import { ACC_PLAYER, decodePlayer, placePixelIx, playerPda, priceFor, programError } from './solana'
 import { errMsg, fetchPixelHistory, usePlace, type Placement, type PlaceState } from './usePlace'
 
 type Drawer = 'activity' | 'leaders' | null
 type TxState = { kind: 'idle' } | { kind: 'busy'; msg: string } | { kind: 'err'; msg: string }
 type Toast = { id: number; msg: string; kind: 'ok' | 'err' }
 
-const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`
-const eth = (wei: bigint) => {
-  const s = formatEther(wei)
-  return `${s.length > 10 ? Number(s).toPrecision(4) : s} ETH`
+const short = (a: string) => `${a.slice(0, 4)}…${a.slice(-4)}`
+const sol = (lamports: bigint) => {
+  const n = Number(lamports) / LAMPORTS_PER_SOL
+  return `${n === 0 ? '0' : n < 0.001 ? n.toPrecision(2) : Number(n.toPrecision(4))} SOL`
 }
 const fmt = (n: number) => n.toLocaleString('en-US')
 
@@ -42,7 +34,7 @@ export default function App() {
   const [color, setColor] = useState(5)
   const [drawer, setDrawer] = useState<Drawer>(null)
   const [toast, setToast] = useState<Toast | null>(null)
-  const cooldown = useCooldown()
+  const cooldown = useCooldown(place.params?.cooldown ?? 0)
 
   const showToast = useCallback((msg: string, kind: Toast['kind'] = 'ok') => {
     const id = Date.now()
@@ -115,7 +107,7 @@ export default function App() {
             <h1>OnChain Place</h1>
             <span className="sub">
               <i className="dot live" />
-              {chain.name}
+              {clusterName}
               {params && ` · ${fmt(params.width)}×${fmt(params.height)}`}
               {place.status === 'ready' && ` · ${fmt(place.totalPlacements)} pixels placed`}
             </span>
@@ -227,17 +219,28 @@ export default function App() {
   )
 }
 
-/** Wallet cooldown: one read, then a local countdown. */
-function useCooldown() {
-  const { address } = useConnection()
-  const { data: remaining, refetch, dataUpdatedAt } = useReadContract({
-    address: contractAddress,
-    abi: placeAbi,
-    functionName: 'cooldownRemaining',
-    args: address ? [address] : undefined,
-    query: { enabled: !!address && !!contractAddress },
-  })
-  const readyAt = address && remaining !== undefined ? dataUpdatedAt + Number(remaining) * 1000 : 0
+/** Wallet cooldown: read the on-chain Player account once, then count down locally. */
+function useCooldown(cooldownSecs: number) {
+  const { connection } = useConnection()
+  const { publicKey } = useWallet()
+  const [readyAt, setReadyAt] = useState(0)
+  const refetch = useCallback(async () => {
+    if (!publicKey) return setReadyAt(0)
+    try {
+      const info = await connection.getAccountInfo(playerPda(publicKey), 'confirmed')
+      if (!info) return setReadyAt(0)
+      // The program checks the cooldown against the chain clock, which can drift from this
+      // machine's clock (badly, on a local validator), so measure the time left in chain time.
+      const chainNow = await connection.getBlockTime(await connection.getSlot('confirmed'))
+      const left = decodePlayer(info.data).lastPlaced + cooldownSecs - (chainNow ?? Date.now() / 1000)
+      setReadyAt(Date.now() + left * 1000)
+    } catch (e) {
+      console.warn('cooldown read failed', e)
+    }
+  }, [connection, publicKey, cooldownSecs])
+  useEffect(() => {
+    refetch()
+  }, [refetch])
   const now = useNow(readyAt > Date.now() ? 250 : 1000)
   return { left: Math.max(0, Math.ceil((readyAt - now) / 1000)), refetch }
 }
@@ -259,75 +262,51 @@ function Tray({
   onClose: () => void
   onPlaced: (msg: string) => void
 }) {
-  const { address, isConnected } = useConnection()
-  const chainId = useChainId()
-  const client = usePublicClient()
-  const { mutateAsync: writeContract } = useWriteContract()
-  const { mutateAsync: switchChain } = useSwitchChain()
+  const { connection } = useConnection()
+  const { publicKey, sendTransaction } = useWallet()
   const [tx, setTx] = useState<TxState>({ kind: 'idle' })
   const [showHistory, setShowHistory] = useState(false)
   const params = place.params!
   const id = selected.y * params.width + selected.x
 
   // Refetch this pixel's history whenever a live placement lands on it.
-  const liveHits = useMemo(() => place.placements.filter((p) => p.pixelId === id).length, [place.placements, id])
+  const liveHits = useMemo(
+    () => place.placements.filter((p) => p.x === selected.x && p.y === selected.y).length,
+    [place.placements, selected.x, selected.y],
+  )
   const [history, setHistory] = useState<Placement[] | null>(null)
   useEffect(() => {
-    if (!client) return
     let stale = false
-    fetchPixelHistory(client, id, params.width)
-      .then((h) => !stale && setHistory(h.reverse()))
+    fetchPixelHistory(connection, selected.x, selected.y, params.width)
+      .then((h) => !stale && setHistory(h))
       .catch((e) => console.warn('pixel history failed', e))
     return () => {
       stale = true
     }
-  }, [client, id, params.width, liveHits])
-  // Overwrite counts aren't bulk-loaded (a 1000×1000 board would be 62,500 words), so read this one pixel.
-  const { data: overwrites, refetch: refetchCount } = useReadContract({
-    address: contractAddress,
-    abi: placeAbi,
-    functionName: 'overwritesOf',
-    args: [BigInt(selected.x), BigInt(selected.y)],
-    query: { enabled: !!contractAddress },
-  })
-  useEffect(() => {
-    refetchCount()
-  }, [liveHits, refetchCount])
-  const count = overwrites ?? 0
-  const price = params.basePrice + params.priceIncrement * BigInt(count)
+  }, [connection, selected.x, selected.y, params.width, liveHits])
+  // The overwrite tier is stored on-chain in each pixel's byte, so it comes with the canvas load.
+  const count = place.tiers[id] ?? 0
+  const price = priceFor(params, count)
   const current = place.colors[id]
 
   async function paint() {
-    if (!address || !client || !contractAddress) return
+    if (!publicKey) return
     try {
-      if (chainId !== chain.id) {
-        setTx({ kind: 'busy', msg: `Switching to ${chain.name}…` })
-        await switchChain({ chainId: chain.id })
-      }
-      setTx({ kind: 'busy', msg: 'Checking price…' })
-      // Re-read on-chain price in case someone overwrote this pixel since our last poll.
-      const livePrice = await client.readContract({
-        address: contractAddress,
-        abi: placeAbi,
-        functionName: 'priceOf',
-        args: [BigInt(selected.x), BigInt(selected.y)],
-      })
-      const call = {
-        address: contractAddress,
-        abi: placeAbi,
-        functionName: 'placePixel',
-        args: [BigInt(selected.x), BigInt(selected.y), color],
-        value: livePrice,
-      } as const
-      // Simulate first so contract errors (cooldown, price) come back decoded instead of as a wallet failure.
-      await client.simulateContract({ ...call, account: address })
+      setTx({ kind: 'busy', msg: 'Simulating…' })
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed')
+      const transaction = new Transaction({ feePayer: publicKey, blockhash, lastValidBlockHeight }).add(
+        placePixelIx(publicKey, params.width, selected.x, selected.y, color),
+      )
+      // Simulate first so program errors (cooldown, bounds) come back readable instead of as a wallet failure.
+      const sim = await connection.simulateTransaction(transaction)
+      if (sim.value.err) throw new Error(programError(sim.value.logs) ?? JSON.stringify(sim.value.err))
       setTx({ kind: 'busy', msg: 'Confirm in wallet…' })
-      const hash = await writeContract(call)
+      const signature = await sendTransaction(transaction, connection)
       setTx({ kind: 'busy', msg: 'Placing…' })
-      const receipt = await client.waitForTransactionReceipt({ hash })
-      if (receipt.status !== 'success') throw new Error('Transaction reverted')
+      const res = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed')
+      if (res.value.err) throw new Error('Transaction failed')
       cooldown.refetch()
-      onPlaced(`Placed (${selected.x}, ${selected.y}) for ${eth(livePrice)}`)
+      onPlaced(`Placed (${selected.x}, ${selected.y}) for ${sol(price)}`)
     } catch (e) {
       setTx({ kind: 'err', msg: friendlyError(e) })
       cooldown.refetch()
@@ -349,7 +328,7 @@ function Tray({
             <span className="muted">
               {count === 0
                 ? ' · never painted'
-                : ` · painted ${count}×${last ? ` · last by ${short(last.painter)}` : ''}`}
+                : ` · painted ${count === 15 ? '15+' : count}×${last ? ` · last by ${short(last.painter)}` : ''}`}
             </span>
           </div>
         </div>
@@ -363,7 +342,7 @@ function Tray({
       {showHistory && history && (
         <ul className="feed history">
           {history.map((p) => (
-            <FeedItem key={`${p.txHash}:${p.logIndex}`} p={p} />
+            <FeedItem key={`${p.signature}:${p.x}:${p.y}`} p={p} />
           ))}
         </ul>
       )}
@@ -387,7 +366,7 @@ function Tray({
         <button className="round cancel" onClick={onClose} aria-label="Cancel" title="Cancel (Esc)">
           <CloseIcon />
         </button>
-        {!isConnected ? (
+        {!publicKey ? (
           <div className="confirm-wrap">
             <Wallet compact />
           </div>
@@ -403,7 +382,7 @@ function Tray({
               </>
             ) : (
               <>
-                <CheckIcon /> Place for {eth(price)}
+                <CheckIcon /> Place for {sol(price)}
               </>
             )}
           </button>
@@ -411,7 +390,8 @@ function Tray({
       </div>
       {tx.kind === 'err' && <p className="tx err">{tx.msg}</p>}
       <p className="fine">
-        Pixels start at {eth(params.basePrice)} and cost {eth(params.priceIncrement)} more each time they're painted over.
+        Pixels start at {sol(params.basePrice)} and cost {sol(params.priceIncrement)} more each time they're painted over
+        (up to 15 times).
         One pixel every {fmtClock(params.cooldown)} per wallet.
       </p>
     </div>
@@ -419,62 +399,67 @@ function Tray({
 }
 
 function Activity({ placements, onPick }: { placements: Placement[]; onPick: (p: Pt) => void }) {
-  const recent = useMemo(
-    () =>
-      [...placements]
-        .sort((a, b) => (a.blockNumber === b.blockNumber ? b.logIndex - a.logIndex : a.blockNumber < b.blockNumber ? 1 : -1))
-        .slice(0, 100),
-    [placements],
-  )
+  // `placements` is oldest first (backfill, then live), so the newest are at the end.
+  const recent = useMemo(() => placements.slice(-100).reverse(), [placements])
   if (!recent.length) return <p className="muted">No pixels placed yet. Be the first.</p>
   return (
     <ul className="feed">
       {recent.map((p) => (
-        <FeedItem key={`${p.txHash}:${p.logIndex}`} p={p} onClick={() => onPick(p)} showCoords />
+        <FeedItem key={`${p.signature}:${p.x}:${p.y}`} p={p} onClick={() => onPick(p)} showCoords />
       ))}
     </ul>
   )
 }
 
 function FeedItem({ p, onClick, showCoords }: { p: Placement; onClick?: () => void; showCoords?: boolean }) {
-  const explorer = chain.blockExplorers?.default.url
   return (
     <li onClick={onClick} className={onClick ? 'clickable' : ''}>
       <i className="dot" style={{ background: PALETTE[p.color] }} />
       <span className="addr">{short(p.painter)}</span>
       {showCoords && <span className="muted">({p.x}, {p.y})</span>}
-      <span className="price">{eth(p.price)}</span>
-      {explorer && (
-        <a href={`${explorer}/tx/${p.txHash}`} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} title="View transaction">
-          ↗
-        </a>
-      )}
+      <span className="price">{sol(p.price)}</span>
+      <a href={explorerUrl('tx', p.signature)} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} title="View transaction">
+        ↗
+      </a>
     </li>
   )
 }
 
-function Leaderboard({ refreshKey }: { refreshKey: number }) {
-  const { address } = useConnection()
-  const [sortBy, setSortBy] = useState<'placed' | 'spent'>('placed')
-  const { data, refetch } = useReadContract({
-    address: contractAddress,
-    abi: placeAbi,
-    functionName: 'getPlayers',
-    args: [0n, 1000n],
-    query: { enabled: !!contractAddress },
-  })
-  useEffect(() => {
-    refetch()
-  }, [refreshKey, refetch])
+type LeaderRow = { addr: string; placed: number; spent: bigint }
 
-  const rows = useMemo(() => {
-    if (!data) return []
-    const [addrs, stats] = data
-    return addrs
-      .map((a, i) => ({ addr: a as Address, placed: Number(stats[i].placed), spent: stats[i].spent }))
-      .sort((a, b) => (sortBy === 'placed' ? b.placed - a.placed : b.spent > a.spent ? 1 : b.spent < a.spent ? -1 : 0))
-      .slice(0, 50)
-  }, [data, sortBy])
+function Leaderboard({ refreshKey }: { refreshKey: number }) {
+  const { connection } = useConnection()
+  const { publicKey } = useWallet()
+  const [sortBy, setSortBy] = useState<'placed' | 'spent'>('placed')
+  const [players, setPlayers] = useState<LeaderRow[]>([])
+  useEffect(() => {
+    let stale = false
+    // Every Player PDA owned by the program, found by its 8-byte account discriminator.
+    connection
+      .getProgramAccounts(programId, { filters: [{ memcmp: { offset: 0, bytes: bs58.encode(ACC_PLAYER) } }] })
+      .then((accs) => {
+        if (stale) return
+        setPlayers(
+          accs.map(({ account }) => {
+            const p = decodePlayer(account.data)
+            return { addr: p.wallet.toBase58(), placed: p.placed, spent: p.spent }
+          }),
+        )
+      })
+      .catch((e) => console.warn('leaderboard failed', e))
+    return () => {
+      stale = true
+    }
+  }, [connection, refreshKey])
+
+  const rows = useMemo(
+    () =>
+      [...players]
+        .sort((a, b) => (sortBy === 'placed' ? b.placed - a.placed : b.spent > a.spent ? 1 : b.spent < a.spent ? -1 : 0))
+        .slice(0, 50),
+    [players, sortBy],
+  )
+  const me = publicKey?.toBase58()
 
   return (
     <>
@@ -487,11 +472,11 @@ function Leaderboard({ refreshKey }: { refreshKey: number }) {
       ) : (
         <ol className="leaders">
           {rows.map((r, i) => (
-            <li key={r.addr} className={r.addr.toLowerCase() === address?.toLowerCase() ? 'me' : ''}>
+            <li key={r.addr} className={r.addr === me ? 'me' : ''}>
               <span className={`rank r${i + 1}`}>{i + 1}</span>
               <span className="addr">{short(r.addr)}</span>
               <span className="muted">{fmt(r.placed)} px</span>
-              <span className="price">{eth(r.spent)}</span>
+              <span className="price">{sol(r.spent)}</span>
             </li>
           ))}
         </ol>
@@ -501,30 +486,58 @@ function Leaderboard({ refreshKey }: { refreshKey: number }) {
 }
 
 function Wallet({ compact }: { compact?: boolean }) {
-  const { address, isConnected } = useConnection()
-  const connectors = useConnectors()
-  const { mutate: connect, isPending, error } = useConnect()
-  const { mutate: disconnect } = useDisconnect()
+  const { connection } = useConnection()
+  const { wallets, select, publicKey, disconnect, connecting, wallet } = useWallet()
+  const [error, setError] = useState<string | null>(null)
 
-  if (isConnected && address) {
+  // Localnet: top up the connected wallet from the validator's faucet so it can pay for pixels.
+  useEffect(() => {
+    if (cluster !== 'localnet' || !publicKey) return
+    connection
+      .getBalance(publicKey)
+      .then(async (bal) => {
+        if (bal < LAMPORTS_PER_SOL / 2) {
+          const sig = await connection.requestAirdrop(publicKey, 2 * LAMPORTS_PER_SOL)
+          await connection.confirmTransaction(sig, 'confirmed')
+        }
+      })
+      .catch((e) => setError(`Airdrop failed: ${errMsg(e)}`))
+  }, [connection, publicKey])
+
+  if (publicKey) {
     return (
-      <button className="pill wallet" onClick={() => disconnect()} title="Disconnect">
+      <button className="pill wallet" onClick={() => disconnect()} title={`Disconnect ${wallet?.adapter.name ?? ''}`}>
         <i className="dot live" />
-        {short(address)}
+        {short(publicKey.toBase58())}
       </button>
     )
   }
+  const usable = wallets.filter(
+    (w) => w.readyState === WalletReadyState.Installed || w.readyState === WalletReadyState.Loadable,
+  )
   return (
     <div className={compact ? 'wallet-wrap compact' : 'wallet-wrap'}>
       <div className="wallet-row">
-        {/* Hide the generic injected button when the wallet announced itself by name (EIP-6963). */}
-        {connectors.filter((c) => c.id !== 'injected' || connectors.length === 1 || !connectors.some((o) => o.type === 'injected' && o.id !== 'injected')).map((c) => (
-          <button key={c.uid} className="pill wallet connect" disabled={isPending} onClick={() => connect({ connector: c })}>
-            {isPending ? 'Connecting…' : c.type === 'mock' ? 'Anvil test account' : c.name === 'Injected' ? 'Connect wallet' : c.name}
+        {usable.map((w) => (
+          <button
+            key={w.adapter.name}
+            className="pill wallet connect"
+            disabled={connecting}
+            onClick={() => {
+              setError(null)
+              select(w.adapter.name) // autoConnect connects as soon as a wallet is selected
+            }}
+          >
+            {connecting ? 'Connecting…' : w.adapter.name === 'Burner Wallet' ? 'Local burner wallet' : w.adapter.name}
           </button>
         ))}
+        {!usable.length && (
+          <a className="pill wallet connect" href="https://phantom.com/download" target="_blank" rel="noreferrer">
+            Install a Solana wallet
+          </a>
+        )}
       </div>
-      {error && <span className="tx err">{error.message.split('\n')[0]}</span>}
+      {error && <span className="tx err">{error}</span>}
     </div>
   )
 }
@@ -565,8 +578,7 @@ function fmtClock(s: number) {
 function friendlyError(e: unknown): string {
   const msg = errMsg(e)
   if (/CooldownActive/.test(msg)) return 'Cooldown still active — wait a bit.'
-  if (/InsufficientPayment/.test(msg)) return 'Price changed — someone just painted this pixel. Try again.'
   if (/User rejected|denied/i.test(msg)) return 'Transaction rejected in wallet.'
-  if (/insufficient funds/i.test(msg)) return 'Not enough ETH for price + gas.'
+  if (/insufficient (funds|lamports)|AccountNotFound|no record of a prior credit/i.test(msg)) return 'Not enough SOL for the pixel price + fee.'
   return msg
 }

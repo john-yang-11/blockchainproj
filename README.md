@@ -1,79 +1,77 @@
 # OnChain Place
 
-r/place on an Ethereum L2 (Base Sepolia). Pay to paint a pixel on a shared 1000×1000 canvas, the same size and 16-color palette as the original r/place (2017).
+r/place as a **Solana smart contract** (a Rust/Anchor program). There's one shared 500×500 canvas with the 16-color r/place 2017 palette. Anyone with a Solana wallet pays a little SOL to paint a pixel. **Every pixel is stored on-chain** in accounts the program owns. There's no database or backend; the website just reads the chain and sends transactions.
 
-**Spec:** pay to place a pixel, with a live canvas frontend.
-**Stretch goals, all done:**
-
-| Goal | How |
+| Feature | How |
 |---|---|
-| Price rises on overwrite | `price = basePrice + priceIncrement × timesPainted`, tracked per pixel on-chain |
-| Cooldown per wallet | `cooldown` seconds between placements, enforced in the contract |
-| Pixel history + leaderboard | `PixelPlaced` events (indexed by pixel and painter) give per-pixel history and an activity feed; the on-chain `players` mapping plus `getPlayers()` gives the leaderboard (pixels placed, ETH spent) |
-| Efficient canvas storage | Colors packed **4 bits/pixel** (64 pixels per storage slot, so the 1M-pixel canvas is 15,625 slots, read in 8 parallel ranged `eth_call`s); overwrite counts packed 16 bits/pixel; cooldown, placed count, and spent share **one slot** per player |
-
-`placePixel` costs ~140–170k gas (most of it is first-time zero→nonzero slot writes).
+| Pay to place a pixel | `place_pixel(chunk, x, y, color)` moves the price in lamports from the painter into the program's vault (the `Config` PDA) |
+| Price rises on overwrite | Each pixel stores an overwrite tier (0–15). `price = base_price + price_increment × tier` |
+| Cooldown per wallet | `Player` PDA stores `last_placed`; enforced with the on-chain `Clock` |
+| History + live feed | Every placement does `emit!(PixelPlaced { x, y, color, tier_before, painter, price, timestamp })`. The frontend subscribes to the program's logs |
+| Leaderboard | One `Player` PDA per wallet (pixels placed, lamports spent), read with `getProgramAccounts` |
+| Efficient storage | **1 byte per pixel** (low 4 bits color, high 4 bits tier), split across 25 zero-copy chunk accounts of 10,000 bytes. The whole board loads in one `getMultipleAccounts` call |
+| Admin | `withdraw` (never below rent exemption) and `set_authority` |
 
 ## Layout
 
 ```
-contracts/   Foundry: src/Place.sol, test/Place.t.sol, script/Deploy.s.sol
-web/         Vite + React + wagmi/viem frontend
-scripts/     deploy.sh, seed.sh, export-abi.mjs
+programs/place/src/lib.rs   the program (Anchor 1.1.2)
+programs/place/tests/       Rust tests (LiteSVM): cargo test
+scripts/init-canvas.mjs     initialize config + chunks (+ --seed demo art and live wallets on localnet)
+scripts/local-chain.sh      build, start validator, deploy, init, seed (run in WSL/Linux)
+web/                        Vite + React frontend (@solana/web3.js + wallet adapter)
+dev.bat                     Windows: does all of the above and opens the site
 ```
 
 ## Setup
 
-Requires Node 20+ and [Foundry](https://getfoundry.sh) (`curl -L https://foundry.paradigm.xyz | bash && foundryup`; on Windows, run that in Git Bash).
+The toolchain runs in WSL (Ubuntu) on Windows, or natively on Linux/macOS. Install Rust, the Solana CLI, Anchor and Node with the official installer (https://solana.com/docs/intro/installation):
 
 ```bash
-git clone --recursive <repo>   # or: git submodule update --init
-cd web && npm install && cd ..
+curl --proto '=https' --tlsv1.2 -sSfL https://solana-install.solana.workers.dev | bash
 ```
+
+Tested with Rust 1.89 (pinned in `rust-toolchain.toml`), solana-cli 3.1.10, anchor-cli 1.1.2 and Node 24. Install the frontend dependencies with `cd web && npm install`.
 
 ## Run locally
 
-**Shortcut:** double-click `dev.bat` (Windows) or run `./scripts/dev.sh`. That does everything below in one go. Ctrl+C stops it.
+**Windows:** double-click `dev.bat`. It opens a WSL window running the local chain (build, validator, deploy, demo art), waits for it, then starts the site.
 
-Or step by step:
+**Manually:**
 
 ```bash
-anvil                                   # terminal 1: local chain
-./scripts/deploy.sh local               # terminal 2: deploys and writes web/.env.local
-./scripts/seed.sh                       # optional: paints ~130k pixels of demo art (about a minute)
-cd web && npm run dev                   # open the printed URL
+./scripts/local-chain.sh        # terminal 1 (WSL/Linux). Leaves solana-test-validator running
+cd web && npm run dev           # terminal 2. Open the printed URL
 ```
 
-Locally there's an **"Anvil test account"** button, so you can paint without MetaMask (it uses anvil's unlocked dev accounts). You can also point MetaMask at `http://127.0.0.1:8545`, chain id 31337.
+Use the **"Local burner wallet"** button. It creates a throwaway key in the browser and airdrops it local SOL, so you don't need a wallet extension. Phantom, Solflare, Backpack, or MetaMask's Solana account work too if you point them at localhost.
 
-Tests: `cd contracts && forge test` (add `--gas-report` for gas numbers).
+Tests: `cargo test` (after `anchor build`). Builds put their output in `$CARGO_TARGET_DIR`; the scripts default it to `~/.cache/place-target`, because building on `/mnt/c` is slow.
 
-## Deploy to Base Sepolia
+## Deploy to devnet
 
-1. Get Base Sepolia ETH from a faucet (e.g. the Coinbase/Alchemy Base Sepolia faucets) for a **throwaway** deployer key.
-2. `PRIVATE_KEY=0x... ./scripts/deploy.sh baseSepolia`
-3. `cd web && npm run build` and host `web/dist` anywhere static (Vercel, Netlify, GitHub Pages), with the same `VITE_*` env vars set.
+1. Put a throwaway deployer key at `~/.config/solana/place-devnet.json`. Generate one with `solana-keygen new -o ...`, or import the Solana private key you saved in `.env`. Never commit it.
+2. Fund it with devnet SOL from https://faucet.solana.com. You need about 5 SOL: about 1.5 for the program and about 1.75 for the 25 canvas chunks.
+3. Build **without** the `localnet` feature, deploy and initialize:
+   ```bash
+   anchor build
+   solana program deploy -u devnet -k ~/.config/solana/place-devnet.json \
+     $CARGO_TARGET_DIR/deploy/place.so --program-id $CARGO_TARGET_DIR/deploy/place-keypair.json
+   node scripts/init-canvas.mjs --url https://api.devnet.solana.com --keypair ~/.config/solana/place-devnet.json
+   ```
+4. `cd web && npm run build` and host `web/dist` on a static host (Vercel etc.) with `VITE_CLUSTER=devnet` and `VITE_PROGRAM_ID=<id>`.
 
-Tune the game with env vars at deploy time: `WIDTH HEIGHT BASE_PRICE PRICE_INCREMENT COOLDOWN` (wei / seconds). Defaults: 1000×1000 (max 4096 per side), 0.00001 ETH base, +0.000005 ETH per overwrite, 30s cooldown.
+Keep `$CARGO_TARGET_DIR/deploy/place-keypair.json` safe: it's the program's address, and you need it to upgrade the program.
 
-If the public RPC rate-limits history loading, set `VITE_RPC_URL` (Alchemy, QuickNode, etc.) and/or lower `VITE_LOG_CHUNK`.
+## Program API
 
-## Contract API
+| Instruction | Who | Notes |
+|---|---|---|
+| `initialize(width, height, base_price, price_increment, cooldown_secs)` | deployer | creates `Config` (seed `"config"`) |
+| `init_chunk(index)` | authority | creates chunk PDA `["chunk", index u16 LE]`, all white |
+| `place_pixel(chunk_index, x, y, color)` | anyone | errors: `OutOfBounds`, `InvalidColor`, `CooldownActive`, `WrongChunk` |
+| `withdraw(amount)` | authority | `InsufficientVault` if it would dip below rent exemption |
+| `set_authority(new)` | authority | |
+| `seed_pixels(chunk, offset, bytes)` | authority | **only compiled with `--features localnet`**, for demo art |
 
-| Function | Notes |
-|---|---|
-| `placePixel(x, y, color) payable` | color is a palette index from 0 to 15. Overpayment is refunded. Reverts `CooldownActive`, `InsufficientPayment`, `OutOfBounds`, `InvalidColor` |
-| `getCanvas(from, count) → uint256[]` | packed colors, words `[from, from+count)` (clamped); pixel `i = y*width + x` is at bits `(i%64)*4` of word `i/64` |
-| `getOverwrites(from, count) → uint256[]` | packed 16-bit paint counts, same ranging |
-| `priceOf(x,y)`, `colorOf(x,y)`, `overwritesOf(x,y)`, `cooldownRemaining(addr)` | single-pixel / player reads |
-| `getPlayers(offset, limit)`, `playerCount()`, `players(addr)` | leaderboard data |
-| `withdraw(to)`, `transferOwnership(newOwner)` | owner only |
-
-Event: `PixelPlaced(uint256 indexed pixelId, address indexed painter, uint8 color, uint16 overwrites, uint256 price)`. Here `overwrites` is the count *before* this placement.
-
-## Frontend notes
-
-- Loads a canvas snapshot at a fixed block, then polls `eth_getLogs` from that block forward, so live updates never miss or double-apply a pixel.
-- It never downloads the full event history, which gets huge on a 1M-pixel board. The pixel count comes from `totalPlacements`, the activity feed backfills only the latest ~200 events (shrinking the block range if the RPC rejects it), and a pixel's history is fetched on demand by its indexed `pixelId` topic.
-- Laid out like r/place: full-screen canvas, "Place a pixel" button, palette tray with cancel/confirm, corner-bracket reticle. Scroll or pinch to zoom, drag to pan, click a pixel to zoom in on it, arrow keys nudge the selection, Esc cancels.
-- Before sending, it re-reads `priceOf` and simulates the tx, so contract errors show up as readable messages instead of a generic wallet failure.
+Pixel `i = y * width + x` lives in chunk `i / 10000`, at byte offset `8 + i % 10000` of that account.
