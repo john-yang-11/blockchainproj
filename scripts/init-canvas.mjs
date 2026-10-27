@@ -3,7 +3,7 @@
 // so the activity feed and leaderboard aren't empty.
 //
 //   node scripts/init-canvas.mjs [--url http://127.0.0.1:8899] [--keypair ~/.config/solana/id.json]
-//                                [--width 500] [--height 500] [--cooldown 30] [--seed]
+//                                [--width 500] [--height 500] [--cooldown 30] [--concurrency 8] [--seed]
 //
 // Idempotent: skips the config and any chunk that already exists.
 // --seed needs a program built with `--features localnet` (it calls the localnet-only seed_pixels).
@@ -104,7 +104,7 @@ const infos = []
 for (let i = 0; i < chunks; i += 100)
   infos.push(...(await connection.getMultipleAccountsInfo(Array.from({ length: Math.min(100, chunks - i) }, (_, j) => chunkPda(i + j)))))
 const missing = infos.map((info, i) => (info ? null : i)).filter((i) => i !== null)
-await pool(missing, 8, (i) =>
+await pool(missing, Number(opt('concurrency', 8)), (i) =>
   send([ix('init_chunk', [r(configPda), w(chunkPda(i)), signer(authority.publicKey), r(SystemProgram.programId)], u16(i))], [authority]),
 )
 console.log(`Chunks: ${chunks} total, ${missing.length} created`)

@@ -12,6 +12,20 @@ r/place as a **Solana smart contract** (a Rust/Anchor program). There's one shar
 | Efficient storage | **1 byte per pixel** (low 4 bits color, high 4 bits tier), split across 25 zero-copy chunk accounts of 10,000 bytes. The whole board loads in one `getMultipleAccounts` call |
 | Admin | `withdraw` (never below rent exemption) and `set_authority` |
 
+## Live on-chain (Solana devnet)
+
+| | |
+|---|---|
+| Website | https://onchain-place.vercel.app |
+| Program id | [`6Pghm9oUF9Tx6VXUwGed7iKqL1qqnYvXciCUaCT63S3L`](https://explorer.solana.com/address/6Pghm9oUF9Tx6VXUwGed7iKqL1qqnYvXciCUaCT63S3L?cluster=devnet) |
+| Network | Solana devnet |
+| Canvas | 500×500, stored on-chain in 25 chunk accounts owned by the program |
+| Price | 0.0001 SOL per pixel, +0.00005 SOL per previous overwrite; 30 s cooldown per wallet |
+
+The program and every pixel live on Solana. Vercel only hosts the static website, which reads the canvas straight from a devnet RPC node and sends your transactions to the program. You could delete the website and the canvas would still be there, readable by anyone through the explorer or any other client.
+
+To paint: open the site, connect a Solana wallet set to **devnet** (Phantom, Solflare, Backpack, or MetaMask's Solana account), grab free devnet SOL from https://faucet.solana.com, click a pixel, choose a color, and approve the transaction.
+
 ## Layout
 
 ```
@@ -50,16 +64,17 @@ Tests: `cargo test` (after `anchor build`). Builds put their output in `$CARGO_T
 
 ## Deploy to devnet
 
-1. Put a throwaway deployer key at `~/.config/solana/place-devnet.json`. Generate one with `solana-keygen new -o ...`, or import the Solana private key you saved in `.env`. Never commit it.
-2. Fund it with devnet SOL from https://faucet.solana.com. You need about 5 SOL: about 1.5 for the program and about 1.75 for the 25 canvas chunks.
+1. Put a throwaway deployer key at `~/.config/solana/place-devnet.json` (`solana-keygen new -o ~/.config/solana/place-devnet.json`). Never commit it.
+2. Fund it with devnet SOL from https://faucet.solana.com. 5 SOL is plenty: the deploy used about 1.05 SOL for the program (plus a buffer that's refunded) and about 1.3 SOL for the 25 canvas chunks.
 3. Build **without** the `localnet` feature, deploy and initialize:
    ```bash
    anchor build
    solana program deploy -u devnet -k ~/.config/solana/place-devnet.json \
      $CARGO_TARGET_DIR/deploy/place.so --program-id $CARGO_TARGET_DIR/deploy/place-keypair.json
-   node scripts/init-canvas.mjs --url https://api.devnet.solana.com --keypair ~/.config/solana/place-devnet.json
+   node scripts/init-canvas.mjs --url https://api.devnet.solana.com --keypair ~/.config/solana/place-devnet.json --concurrency 2
    ```
-4. `cd web && npm run build` and host `web/dist` on a static host (Vercel etc.) with `VITE_CLUSTER=devnet` and `VITE_PROGRAM_ID=<id>`.
+   The public devnet RPC rate-limits bursts, hence `--concurrency 2`. The script is idempotent, so just rerun it if it stops partway.
+4. Host the website: `cd web && vercel deploy --prod`. The Vercel project has `VITE_CLUSTER=devnet` and `VITE_PROGRAM_ID=<id>` set as environment variables.
 
 Keep `$CARGO_TARGET_DIR/deploy/place-keypair.json` safe: it's the program's address, and you need it to upgrade the program.
 
