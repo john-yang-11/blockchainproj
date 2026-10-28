@@ -24,6 +24,8 @@ r/place as a **Solana smart contract** (a Rust/Anchor program). There's one shar
 
 The program and every pixel live on Solana. Vercel only hosts the static website, which reads the canvas straight from a devnet RPC node and sends your transactions to the program. You could delete the website and the canvas would still be there, readable by anyone through the explorer or any other client.
 
+The devnet canvas has pixel art painted the same way any user would, one paid `place_pixel` per pixel (see `scripts/paint.mjs`): Tung Tung Tung Sahur at (222, 200), Pepe at (300, 205), and the KPop Demon Hunters trio HUNTR/X at (205, 265).
+
 To paint: open the site, connect a Solana wallet set to **devnet** (Phantom, Solflare, Backpack, or MetaMask's Solana account), grab free devnet SOL from https://faucet.solana.com, click a pixel, choose a color, and approve the transaction.
 
 ## Layout
@@ -32,6 +34,9 @@ To paint: open the site, connect a Solana wallet set to **devnet** (Phantom, Sol
 programs/place/src/lib.rs   the program (Anchor 1.1.2)
 programs/place/tests/       Rust tests (LiteSVM): cargo test
 scripts/init-canvas.mjs     initialize config + chunks (+ --seed demo art and live wallets on localnet)
+scripts/paint.mjs           paint pixel art onto a live canvas through place_pixel (real prices + cooldowns)
+scripts/image-to-art.py     convert a picture into palette pixel art for paint.mjs
+scripts/art/                art painted on devnet: HUNTR/X (KPop Demon Hunters), Pepe, Tung Tung Tung Sahur
 scripts/local-chain.sh      build, start validator, deploy, init, seed (run in WSL/Linux)
 web/                        Vite + React frontend (@solana/web3.js + wallet adapter)
 dev.bat                     Windows: does all of the above and opens the site
