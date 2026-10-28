@@ -263,7 +263,7 @@ function Tray({
   onPlaced: (msg: string) => void
 }) {
   const { connection } = useConnection()
-  const { publicKey, sendTransaction } = useWallet()
+  const { publicKey, sendTransaction, signTransaction } = useWallet()
   const [tx, setTx] = useState<TxState>({ kind: 'idle' })
   const [showHistory, setShowHistory] = useState(false)
   const params = place.params!
@@ -301,7 +301,11 @@ function Tray({
       const sim = await connection.simulateTransaction(transaction)
       if (sim.value.err) throw new Error(programError(sim.value.logs) ?? JSON.stringify(sim.value.err))
       setTx({ kind: 'busy', msg: 'Confirm in wallet…' })
-      const signature = await sendTransaction(transaction, connection)
+      // Prefer sign-only and send through our own RPC: wallets that sign *and* send (MetaMask's Solana
+      // account) submit to whatever cluster the wallet is on, which is often mainnet, not ours.
+      const signature = signTransaction
+        ? await connection.sendRawTransaction((await signTransaction(transaction)).serialize())
+        : await sendTransaction(transaction, connection)
       setTx({ kind: 'busy', msg: 'Placing…' })
       const res = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed')
       if (res.value.err) throw new Error('Transaction failed')
@@ -579,6 +583,6 @@ function friendlyError(e: unknown): string {
   const msg = errMsg(e)
   if (/CooldownActive/.test(msg)) return 'Cooldown still active — wait a bit.'
   if (/User rejected|denied/i.test(msg)) return 'Transaction rejected in wallet.'
-  if (/insufficient (funds|lamports)|AccountNotFound|no record of a prior credit/i.test(msg)) return 'Not enough SOL for the pixel price + fee.'
+  if (/insufficient (funds|lamports)|AccountNotFound|no record of a prior credit/i.test(msg)) return 'Not enough devnet SOL for the pixel price + fee. Get some free at faucet.solana.com.'
   return msg
 }
