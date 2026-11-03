@@ -127,19 +127,32 @@ export function parsePlacements(logs: readonly string[], signature: string, slot
   return out
 }
 
-/** Placements from the most recent transactions that touched `address`, newest first. */
+/** Transactions fetched per request, and the pause between requests. Public RPCs count every tx in a
+ *  batch as its own request, so a big burst gets the whole site rate-limited, including sends. */
+const TX_BATCH = 5
+const TX_PAUSE_MS = 400
+
+/** Placements from the most recent transactions that touched `address`, newest first. Best effort:
+ *  if the RPC starts rate-limiting, it stops and returns what it has rather than retrying harder. */
 export async function recentPlacements(connection: Connection, address: PublicKey, limit: number): Promise<Placement[]> {
   const sigs = (await connection.getSignaturesForAddress(address, { limit })).filter((s) => !s.err)
   const out: Placement[] = []
-  for (let i = 0; i < sigs.length; i += 50) {
-    const batch = sigs.slice(i, i + 50)
-    const txs = await connection.getTransactions(
-      batch.map((s) => s.signature),
-      { maxSupportedTransactionVersion: 0, commitment: 'confirmed' },
-    )
-    txs.forEach((tx: VersionedTransactionResponse | null, j) => {
+  for (let i = 0; i < sigs.length; i += TX_BATCH) {
+    const batch = sigs.slice(i, i + TX_BATCH)
+    let txs: (VersionedTransactionResponse | null)[]
+    try {
+      txs = await connection.getTransactions(
+        batch.map((s) => s.signature),
+        { maxSupportedTransactionVersion: 0, commitment: 'confirmed' },
+      )
+    } catch (e) {
+      console.warn('stopped loading history early', e)
+      break
+    }
+    txs.forEach((tx, j) => {
       if (tx?.meta?.logMessages) out.push(...parsePlacements(tx.meta.logMessages, batch[j].signature, tx.slot))
     })
+    await new Promise((res) => setTimeout(res, TX_PAUSE_MS))
   }
   return out
 }

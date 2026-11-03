@@ -31,8 +31,9 @@ export type PlaceState = {
   version: number
 }
 
-/** How many recent placements to backfill for the activity feed. Full history is never loaded. */
-const RECENT = 200
+/** How many recent placements to backfill for the activity feed. Full history is never loaded, and
+ *  this stays small because the free devnet RPC rate-limits transaction fetches hard. */
+const RECENT = 40
 /** Full re-read of the canvas accounts, in case the log websocket dropped something. */
 const RESYNC_MS = 20_000
 
@@ -63,7 +64,7 @@ async function loadCanvas(connection: Connection) {
 /** This pixel's placements among its chunk's recent transactions, newest first. Best effort, capped. */
 export async function fetchPixelHistory(connection: Connection, x: number, y: number, width: number): Promise<Placement[]> {
   const chunk = Math.floor((y * width + x) / CHUNK_SIZE)
-  const all = await recentPlacements(connection, chunkPda(chunk), 300)
+  const all = await recentPlacements(connection, chunkPda(chunk), 60)
   return all.filter((p) => p.x === x && p.y === y)
 }
 

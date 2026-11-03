@@ -400,7 +400,7 @@ function Tray({
   onPlaced: (msg: string, signature: string) => void
 }) {
   const { connection } = useConnection()
-  const { publicKey, sendTransaction, signTransaction } = useWallet()
+  const { publicKey, sendTransaction } = useWallet()
   const [tx, setTx] = useState<TxState>({ kind: 'idle' })
   const [showHistory, setShowHistory] = useState(false)
   const [history, setHistory] = useState<Placement[] | null>(null)
@@ -449,11 +449,10 @@ function Tray({
       const sim = await connection.simulateTransaction(transaction)
       if (sim.value.err) throw new Error(programError(sim.value.logs) ?? JSON.stringify(sim.value.err))
       setTx({ kind: 'busy', msg: 'Approve in wallet…' })
-      // Prefer sign-only and send through our own RPC: wallets that sign *and* send (MetaMask's Solana
-      // account) submit to whatever cluster the wallet is on, which is often mainnet, not ours.
-      const signature = signTransaction
-        ? await connection.sendRawTransaction((await signTransaction(transaction)).serialize())
-        : await sendTransaction(transaction, connection)
+      // sendTransaction passes the cluster (derived from our RPC endpoint) as the wallet-standard
+      // `chain`. MetaMask only honors that on signAndSend: its signTransaction always uses the
+      // session's network, which defaults to mainnet, where this program doesn't exist.
+      const signature = await sendTransaction(transaction, connection)
       setTx({ kind: 'busy', msg: 'Confirming…' })
       const res = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed')
       if (res.value.err) throw new Error('Transaction failed')
@@ -931,6 +930,7 @@ function friendlyError(e: unknown): string {
   const msg = errMsg(e)
   if (/CooldownActive/.test(msg)) return 'Cooldown still active. Wait a bit.'
   if (/User rejected|denied/i.test(msg)) return 'Transaction rejected in wallet.'
+  if (/429|Too many requests/i.test(msg)) return 'The free devnet server is busy. Wait a few seconds and try again.'
   if (/insufficient (funds|lamports)|AccountNotFound|no record of a prior credit/i.test(msg)) return 'Not enough devnet SOL for the pixel price + fee. Get some free at faucet.solana.com.'
   return msg
 }
