@@ -2,12 +2,15 @@ import { PublicKey, clusterApiUrl } from '@solana/web3.js'
 import idl from './idl/place.json'
 
 const env = import.meta.env
+// Trimmed because hosting dashboards/CLIs can save values with a trailing newline, which turns the
+// program id into invalid base58 and blanks the whole page.
+const envVar = (name: 'VITE_CLUSTER' | 'VITE_RPC_URL' | 'VITE_PROGRAM_ID') => (env[name] as string | undefined)?.trim() || undefined
 
 /** "localnet" (solana-test-validator on 127.0.0.1) or "devnet". */
-export const cluster: 'localnet' | 'devnet' = env.VITE_CLUSTER === 'devnet' ? 'devnet' : 'localnet'
+export const cluster: 'localnet' | 'devnet' = envVar('VITE_CLUSTER') === 'devnet' ? 'devnet' : 'localnet'
 export const clusterName = cluster === 'devnet' ? 'Solana devnet' : 'Solana localnet'
-export const rpcUrl: string = env.VITE_RPC_URL || (cluster === 'devnet' ? clusterApiUrl('devnet') : 'http://127.0.0.1:8899')
-export const programId = new PublicKey(env.VITE_PROGRAM_ID || idl.address)
+export const rpcUrl: string = envVar('VITE_RPC_URL') || (cluster === 'devnet' ? clusterApiUrl('devnet') : 'http://127.0.0.1:8899')
+export const programId = new PublicKey(envVar('VITE_PROGRAM_ID') || idl.address)
 
 /** Solana Explorer link for a tx or account; localnet works via the explorer's custom-RPC mode. */
 export function explorerUrl(kind: 'tx' | 'address', id: string) {
